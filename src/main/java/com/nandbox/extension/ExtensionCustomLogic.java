@@ -20,7 +20,15 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
 
     private static final String TABLE_NAME = "menu_submissions";
 
-    // admin privileges: owner userId "1" OR chatSettings flags 128/512
+    private static final String OWNER_USER_ID = "1";
+
+    private static final String CMD_GET = "/get";
+    private static final String CMD_DELETE = "/delete";
+    private static final String CMD_GET_ALL = "/get_all";
+    private static final String CMD_DELETE_ALL = "/delete_all";
+
+    private static final String REF_LIST = "LIST";
+    private static final String REF_DELETE_ALL = "DELETE_ALL";
 
     public static void main(String[] args) throws Exception {
         String TOKEN = "";
@@ -52,6 +60,7 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
     }
 
     // Handles all menu/form submissions and saves them using record id = userId.
+    // Do NOT add @Override here, because some SDK builds do not declare it in ExtensionAdapter.
     public void onMenuCallback(MenuCallback menuCallback) {
         if (menuCallback == null) {
             return;
@@ -62,8 +71,8 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
             return;
         }
 
-        String appId = extractAppId(menuCallback);
-        String menuId = extractMenuId(menuCallback);
+        String appId = extractStringNoArg(menuCallback, "getAppId");
+        String menuId = extractStringNoArg(menuCallback, "getMenuId");
 
         JSONObject doc = new JSONObject();
         doc.put("_id", userId);
@@ -75,7 +84,7 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
         }
         doc.put("saved_at", String.valueOf(System.currentTimeMillis()));
 
-        Object cells = extractCells(menuCallback);
+        Object cells = invokeNoArg(menuCallback, "getCells");
         if (cells != null) {
             try {
                 if (cells instanceof JSONArray) {
@@ -118,18 +127,17 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
             return;
         }
 
-        if (startsWithIgnoreCase(text, "/get ") || startsWithIgnoreCase(text, "get ")) {
+        if (startsWithIgnoreCase(text, CMD_GET + " ") || startsWithIgnoreCase(text, "get ")) {
             String targetUserId = text.substring(text.indexOf(' ') + 1).trim();
             if (targetUserId.length() == 0) {
                 sendText(chatId, userId, chatSettings, appId, "Usage: /get <userId>");
                 return;
             }
-            DatabaseService.getInstance().get(api, targetUserId, TABLE_NAME, Utils.getUniqueId());
-            sendText(chatId, userId, chatSettings, appId, "Requested record for userId: " + targetUserId);
+            DatabaseService.getInstance().get(api, targetUserId, TABLE_NAME, buildRef(REF_LIST, chatId, userId));
             return;
         }
 
-        if (startsWithIgnoreCase(text, "/delete ") || startsWithIgnoreCase(text, "delete ")) {
+        if (startsWithIgnoreCase(text, CMD_DELETE + " ") || startsWithIgnoreCase(text, "delete ")) {
             String targetUserId2 = text.substring(text.indexOf(' ') + 1).trim();
             if (targetUserId2.length() == 0) {
                 sendText(chatId, userId, chatSettings, appId, "Usage: /delete <userId>");
@@ -140,20 +148,17 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
             return;
         }
 
-        if (equalsIgnoreCase(text, "/get_all") || equalsIgnoreCase(text, "get all") || equalsIgnoreCase(text, "all")
-                || equalsIgnoreCase(text, "/delete_all") || equalsIgnoreCase(text, "delete all") || equalsIgnoreCase(text, "del all")) {
-            // Not supported by the documented DatabaseService contract in this environment.
-            sendText(chatId, userId, chatSettings, appId,
-                    "This DatabaseService build supports only: set(doc,id), get(id), delete(id).\n" +
-                            "Listing/deleting all records is not available.");
+        if (equalsIgnoreCase(text, CMD_GET_ALL) || equalsIgnoreCase(text, "get all") || equalsIgnoreCase(text, "all")) {
+            DatabaseService.getInstance().list(api, TABLE_NAME, buildRef(REF_LIST, chatId, userId));
             return;
         }
 
-        String help = "Admin commands:\n" +
-                "/get <userId> - get one user's saved menu submission\n" +
-                "/delete <userId> - delete one user's record\n" +
-                "\nNote: /get_all and /delete_all are not supported in this build.";
-        sendText(chatId, userId, chatSettings, appId, help);
+        if (equalsIgnoreCase(text, CMD_DELETE_ALL) || equalsIgnoreCase(text, "delete all") || equalsIgnoreCase(text, "del all")) {
+            DatabaseService.getInstance().list(api, TABLE_NAME, buildRef(REF_DELETE_ALL, chatId, userId));
+            return;
+        }
+
+        sendText(chatId, userId, chatSettings, appId, getHelpText());
     }
 
     @Override
@@ -162,22 +167,68 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
             return;
         }
 
-        // Keep callback non-empty and safe.
+        String ref = null;
         try {
-            JSONObject doc = extensionDocResponse.getDoc();
-            if (doc != null) {
-                return;
-            }
+            ref = extensionDocResponse.getRef();
         } catch (Throwable t) {
         }
 
+        if (ref == null) {
+            return;
+        }
+
+        String action = refPart(ref, 0);
+        String chatId = refPart(ref, 1);
+        String adminUserId = refPart(ref, 2);
+
+        if (action == null || chatId == null || adminUserId == null) {
+            return;
+        }
+
+        JSONArray docs = null;
         try {
-            JSONArray docs = extensionDocResponse.getDocs();
-            if (docs != null) {
-                return;
-            }
+            docs = extensionDocResponse.getDocs();
         } catch (Throwable t2) {
         }
+
+        if (REF_LIST.equals(action)) {
+            if (docs == null || docs.size() == 0) {
+                sendText(chatId, adminUserId, null, null, "No records found.");
+                return;
+            }
+            sendText(chatId, adminUserId, null, null, formatDocsList(docs));
+            return;
+        }
+
+        if (REF_DELETE_ALL.equals(action)) {
+            if (docs == null || docs.size() == 0) {
+                sendText(chatId, adminUserId, null, null, "No records to delete.");
+                return;
+            }
+
+            int deletedScheduled = 0;
+            for (int i = 0; i < docs.size(); i++) {
+                Object o = docs.get(i);
+                if (o instanceof JSONObject) {
+                    JSONObject d = (JSONObject) o;
+                    String id = safeToString(d.get("_id"));
+                    if (id != null) {
+                        DatabaseService.getInstance().delete(api, id, TABLE_NAME, Utils.getUniqueId());
+                        deletedScheduled++;
+                    }
+                }
+            }
+
+            sendText(chatId, adminUserId, null, null, "Delete all requested. Records scheduled for deletion: " + deletedScheduled);
+        }
+    }
+
+    private String getHelpText() {
+        return "Admin commands:\n" +
+                "/get <userId> - get one user's saved menu submission\n" +
+                "/get_all - list all saved submissions\n" +
+                "/delete <userId> - delete one user's record\n" +
+                "/delete_all - delete all records (lists then deletes one-by-one)";
     }
 
     private boolean isAdmin(IncomingMessage incomingMsg) {
@@ -185,18 +236,16 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
             return false;
         }
 
-        // Owner userId (from module_object): "1"
         try {
             if (incomingMsg.getFrom() != null && incomingMsg.getFrom().getId() != null) {
                 String fromId = incomingMsg.getFrom().getId();
-                if (fromId != null && fromId.equals("1")) {
+                if (fromId != null && fromId.equals(OWNER_USER_ID)) {
                     return true;
                 }
             }
         } catch (Throwable t) {
         }
 
-        // Privileged chat settings (from module_object privileges): 128, 512
         try {
             if (incomingMsg.getChatSettings() != null) {
                 int settings = incomingMsg.getChatSettings().intValue();
@@ -245,7 +294,8 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
     }
 
     private String extractUserId(MenuCallback menuCallback) {
-        // Use only safe reflection fallbacks without inventing SDK getters.
+        // MenuCallback getters differ by SDK build; use safe reflection.
+        // Prefer getFrom().getId() then getUserId().
         try {
             Object fromObj = invokeNoArg(menuCallback, "getFrom");
             if (fromObj != null) {
@@ -260,43 +310,33 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
         } catch (Throwable t) {
         }
 
-        return null;
-    }
-
-    private String extractAppId(MenuCallback menuCallback) {
-        try {
-            Object a = invokeNoArg(menuCallback, "getAppId");
-            if (a != null) {
-                String s = String.valueOf(a).trim();
-                if (s.length() > 0) {
-                    return s;
-                }
-            }
-        } catch (Throwable t) {
+        String uid = extractStringNoArg(menuCallback, "getUserId");
+        if (uid != null) {
+            return uid;
         }
+
         return null;
     }
 
-    private String extractMenuId(MenuCallback menuCallback) {
-        try {
-            Object m = invokeNoArg(menuCallback, "getMenuId");
-            if (m != null) {
-                String s = String.valueOf(m).trim();
-                if (s.length() > 0) {
-                    return s;
-                }
-            }
-        } catch (Throwable t) {
+    private String extractStringNoArg(Object obj, String method) {
+        Object o = invokeNoArg(obj, method);
+        if (o == null) {
+            return null;
         }
-        return null;
-    }
-
-    private Object extractCells(MenuCallback menuCallback) {
+        String s = null;
         try {
-            return invokeNoArg(menuCallback, "getCells");
+            s = String.valueOf(o);
         } catch (Throwable t) {
             return null;
         }
+        if (s == null) {
+            return null;
+        }
+        s = s.trim();
+        if (s.length() == 0) {
+            return null;
+        }
+        return s;
     }
 
     private Object invokeNoArg(Object target, String method) {
@@ -309,5 +349,125 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    private String buildRef(String action, String chatId, String adminUserId) {
+        // action:chatId:adminUserId:unique
+        return action + ":" + safeRefPart(chatId) + ":" + safeRefPart(adminUserId) + ":" + Utils.getUniqueId();
+    }
+
+    private String safeRefPart(String s) {
+        if (s == null) {
+            return "";
+        }
+        // avoid ':' in ref parts
+        int idx = s.indexOf(':');
+        if (idx < 0) {
+            return s;
+        }
+        return s.replace(':', '_');
+    }
+
+    private String refPart(String ref, int index) {
+        if (ref == null) {
+            return null;
+        }
+        int p1 = ref.indexOf(':');
+        if (p1 < 0) {
+            return null;
+        }
+        int p2 = ref.indexOf(':', p1 + 1);
+        if (p2 < 0) {
+            return null;
+        }
+        int p3 = ref.indexOf(':', p2 + 1);
+        if (p3 < 0) {
+            return null;
+        }
+
+        if (index == 0) {
+            return ref.substring(0, p1);
+        }
+        if (index == 1) {
+            return ref.substring(p1 + 1, p2);
+        }
+        if (index == 2) {
+            return ref.substring(p2 + 1, p3);
+        }
+        return null;
+    }
+
+    private String safeToString(Object o) {
+        if (o == null) {
+            return null;
+        }
+        String s = null;
+        try {
+            s = String.valueOf(o);
+        } catch (Throwable t) {
+            return null;
+        }
+        if (s == null) {
+            return null;
+        }
+        s = s.trim();
+        if (s.length() == 0) {
+            return null;
+        }
+        return s;
+    }
+
+    private String formatDocsList(JSONArray docs) {
+        if (docs == null || docs.size() == 0) {
+            return "No records found.";
+        }
+
+        StringBuffer sb = new StringBuffer();
+        sb.append("Records (");
+        sb.append(docs.size());
+        sb.append("):\n");
+
+        int max = docs.size();
+        if (max > 50) {
+            max = 50;
+        }
+
+        for (int i = 0; i < max; i++) {
+            Object o = docs.get(i);
+            if (o instanceof JSONObject) {
+                JSONObject d = (JSONObject) o;
+                String id = safeToString(d.get("_id"));
+                sb.append(i + 1);
+                sb.append(") userId=");
+                sb.append(id == null ? "?" : id);
+
+                String menuId = safeToString(d.get("menu_id"));
+                if (menuId != null) {
+                    sb.append(" menu_id=");
+                    sb.append(menuId);
+                }
+
+                String savedAt = safeToString(d.get("saved_at"));
+                if (savedAt != null) {
+                    sb.append(" saved_at=");
+                    sb.append(savedAt);
+                }
+
+                sb.append("\n");
+            } else {
+                sb.append(i + 1);
+                sb.append(") ");
+                sb.append(String.valueOf(o));
+                sb.append("\n");
+            }
+        }
+
+        if (docs.size() > max) {
+            sb.append("... showing first ");
+            sb.append(max);
+            sb.append(" records\n");
+        }
+
+        return sb.toString();
     }
 }
