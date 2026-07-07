@@ -20,7 +20,7 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
 
     private static final String TABLE_NAME = "menu_submissions";
 
-    private static final String OWNER_USER_ID = "1";
+    private static final String OWNER_USER_ID = "90092883306759582";
 
     private static final String CMD_GET = "/get";
     private static final String CMD_DELETE = "/delete";
