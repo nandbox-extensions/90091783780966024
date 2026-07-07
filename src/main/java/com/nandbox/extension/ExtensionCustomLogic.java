@@ -20,6 +20,8 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
 
     private static final String TABLE_NAME = "menu_submissions";
 
+    // admin privileges: owner userId "1" OR chatSettings flags 128/512
+
     public static void main(String[] args) throws Exception {
         String TOKEN = "";
         Properties properties = new Properties();
@@ -50,7 +52,6 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
     }
 
     // Handles all menu/form submissions and saves them using record id = userId.
-    // NOTE: Do NOT annotate with @Override because some SDK builds name this callback differently.
     public void onMenuCallback(MenuCallback menuCallback) {
         if (menuCallback == null) {
             return;
@@ -82,7 +83,7 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
                 } else {
                     doc.put("cells", String.valueOf(cells));
                 }
-            } catch (Exception e) {
+            } catch (Throwable t) {
                 doc.put("cells", String.valueOf(cells));
             }
         }
@@ -90,13 +91,11 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
         DatabaseService.getInstance().set(api, doc, TABLE_NAME, userId, Utils.getUniqueId());
     }
 
-    // Admin commands via chat.
     @Override
     public void onReceive(IncomingMessage incomingMsg) {
         if (incomingMsg == null || incomingMsg.getText() == null) {
             return;
         }
-
         if (incomingMsg.getChat() == null || incomingMsg.getFrom() == null) {
             return;
         }
@@ -143,8 +142,10 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
 
         if (equalsIgnoreCase(text, "/get_all") || equalsIgnoreCase(text, "get all") || equalsIgnoreCase(text, "all")
                 || equalsIgnoreCase(text, "/delete_all") || equalsIgnoreCase(text, "delete all") || equalsIgnoreCase(text, "del all")) {
+            // Not supported by the documented DatabaseService contract in this environment.
             sendText(chatId, userId, chatSettings, appId,
-                    "This DatabaseService build supports only: set(doc,id), get(id), delete(id). Listing/deleting all records is not available.");
+                    "This DatabaseService build supports only: set(doc,id), get(id), delete(id).\n" +
+                            "Listing/deleting all records is not available.");
             return;
         }
 
@@ -155,14 +156,13 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
         sendText(chatId, userId, chatSettings, appId, help);
     }
 
-    // Database responses are delivered here.
     @Override
     public void onExtensionDocResponse(ExtensionDocResponse extensionDocResponse) {
         if (extensionDocResponse == null) {
             return;
         }
 
-        // Accessing doc(s) ensures the callback is functional and non-empty.
+        // Keep callback non-empty and safe.
         try {
             JSONObject doc = extensionDocResponse.getDoc();
             if (doc != null) {
@@ -185,6 +185,7 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
             return false;
         }
 
+        // Owner userId (from module_object): "1"
         try {
             if (incomingMsg.getFrom() != null && incomingMsg.getFrom().getId() != null) {
                 String fromId = incomingMsg.getFrom().getId();
@@ -195,6 +196,7 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
         } catch (Throwable t) {
         }
 
+        // Privileged chat settings (from module_object privileges): 128, 512
         try {
             if (incomingMsg.getChatSettings() != null) {
                 int settings = incomingMsg.getChatSettings().intValue();
@@ -243,6 +245,7 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
     }
 
     private String extractUserId(MenuCallback menuCallback) {
+        // Use only safe reflection fallbacks without inventing SDK getters.
         try {
             Object fromObj = invokeNoArg(menuCallback, "getFrom");
             if (fromObj != null) {
@@ -255,17 +258,6 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
                 }
             }
         } catch (Throwable t) {
-        }
-
-        try {
-            Object uid = invokeNoArg(menuCallback, "getUserId");
-            if (uid != null) {
-                String s2 = String.valueOf(uid).trim();
-                if (s2.length() > 0) {
-                    return s2;
-                }
-            }
-        } catch (Throwable t2) {
         }
 
         return null;
